@@ -7,6 +7,7 @@ public class RigidBody {
     private final double mass;
     private final double momentOfInertia; // About the body-space origin
     private final double coefficientOfRestitution; // Bounciness (0 = perfectly inelastic, 1 = perfectly elastic)
+    private final double coefficientOfKineticFriction;
 
     private Vector2D velocity; // In world-space
     private Vector2D worldPos;
@@ -16,18 +17,29 @@ public class RigidBody {
     private Vector2D linearAcceleration; // In world-space, computed from applied forces
     private double angularAcceleration; // In body-space, computed from applied forces
 
+    private final boolean isStatic;
     private final ArrayList<Force> appliedForces = new ArrayList<>();
+    private final ArrayList<Force> temporaryForces = new ArrayList<>(); // Cleared and refilled each step (e.g. friction)
 
     public RigidBody(Vector2D[] vertices, double mass, Vector2D pos, double orientation) {
-        this(vertices, mass, pos, orientation, 0.8); // Default restitution of 0.8
+        this(vertices, mass, pos, orientation, 0.8, false, 0.3);
     }
 
     public RigidBody(Vector2D[] vertices, double mass, Vector2D pos, double orientation, double coefficientOfRestitution) {
+        this(vertices, mass, pos, orientation, coefficientOfRestitution, false, 0.3);
+    }
+
+    public RigidBody(Vector2D[] vertices, double mass, Vector2D pos, double orientation, double coefficientOfRestitution, boolean isStatic) {
+        this(vertices, mass, pos, orientation, coefficientOfRestitution, isStatic, 0.3);
+    }
+
+    public RigidBody(Vector2D[] vertices, double mass, Vector2D pos, double orientation, double coefficientOfRestitution, boolean isStatic, double coefficientOfKineticFriction) {
         this.vertices = vertices;
         this.mass = mass;
         this.coefficientOfRestitution = coefficientOfRestitution;
+        this.isStatic = isStatic;
+        this.coefficientOfKineticFriction = coefficientOfKineticFriction;
 
-        // Compute inertia about the body-space origin (do NOT translate vertices by COM)
         this.momentOfInertia = calculateMomentOfInertia(vertices, mass);
 
         this.velocity = new Vector2D(0, 0);
@@ -37,6 +49,14 @@ public class RigidBody {
 
         this.linearAcceleration = new Vector2D(0, 0);
         this.angularAcceleration = 0;
+    }
+
+    public static RigidBody createStatic(Vector2D[] vertices, Vector2D pos, double orientation) {
+        return new RigidBody(vertices, 1.0, pos, orientation, 0.5, true, 0.4);
+    }
+
+    public boolean isStatic() {
+        return isStatic;
     }
 
     /**
@@ -57,6 +77,8 @@ public class RigidBody {
     }
 
     public void stepTime (double time) {
+        if (isStatic) return;
+
         // Update accelerations based on currently applied forces
         this.linearAcceleration = getLinearAcceleration();
         this.angularAcceleration = getAngularAcceleration();
@@ -76,6 +98,14 @@ public class RigidBody {
 
     public void clearForces() {
         this.appliedForces.clear();
+    }
+
+    public void applyTemporaryForce(Force f) {
+        this.temporaryForces.add(f);
+    }
+
+    public void clearTemporaryForces() {
+        this.temporaryForces.clear();
     }
 
     public Vector2D getLinearAcceleration() {
@@ -114,6 +144,10 @@ public class RigidBody {
         return coefficientOfRestitution;
     }
 
+    public double getCoefficientOfKineticFriction() {
+        return coefficientOfKineticFriction;
+    }
+
     public Vector2D[] getVertices() {
         return vertices;
     }
@@ -147,35 +181,33 @@ public class RigidBody {
 
         double netTorque = 0.0;
 
-        for (Force force : appliedForces) {
-            Vector2D rBody = force.getApplicationPoint(); // body-space (relative to body origin)
-            Vector2D fWorld = force.getForceVector();     // world-space
-
-            // Rotate r from body-space origin into world-space: r_world = R(orientation) * r_body
+        for (Force force : allForces()) {
+            Vector2D rBody = force.getApplicationPoint();
+            Vector2D fWorld = force.getForceVector();
             Vector2D rWorld = rBody.rotate(worldOrientation);
-
-            // Torque = r_world x f_world (scalar z-component) — torque about the body origin
-            double torque = rWorld.cross(fWorld);
-            netTorque += torque;
+            netTorque += rWorld.cross(fWorld);
         }
 
-        return netTorque / momentOfInertia; // α = τ / I_origin
+        return netTorque / momentOfInertia;
     }
 
-    /**
-     * Calculate the linear acceleration based on the net force applied to the body.
-     * This is in world-space: sum all world-space forces and divide by mass.
-     */
     private Vector2D calculateLinearAcceleration(){
         if (Math.abs(mass) < 1e-12) {
             throw new IllegalStateException("Mass is zero or too small to compute linear acceleration");
         }
 
         Vector2D netForce = new Vector2D(0, 0);
-        for (Force force : appliedForces) {
+        for (Force force : allForces()) {
             netForce = netForce.add(force.getForceVector());
         }
-        return netForce.scale(1.0 / mass); // a = F / m
+        return netForce.scale(1.0 / mass);
+    }
+
+    private List<Force> allForces() {
+        List<Force> all = new ArrayList<>(appliedForces.size() + temporaryForces.size());
+        all.addAll(appliedForces);
+        all.addAll(temporaryForces);
+        return all;
     }
 
     /**

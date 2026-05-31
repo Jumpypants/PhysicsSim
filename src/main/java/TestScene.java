@@ -34,42 +34,115 @@ public class TestScene extends JPanel {
      * Sets up the initial scene with rigid bodies.
      */
     private void setupScene() {
-        // Create a square rigid body
-        Vector2D[] squareVertices = new Vector2D[]{
-            new Vector2D(-0.5, -0.5),  // Bottom-left
-            new Vector2D(0.5, -0.5),   // Bottom-right
-            new Vector2D(0.5, 0.5),    // Top-right
-            new Vector2D(-0.5, 0.5)    // Top-left
+        // Immovable floor spanning the visible width
+        Vector2D[] floorVertices = new Vector2D[]{
+            new Vector2D(-9, -0.3),
+            new Vector2D( 9, -0.3),
+            new Vector2D( 9,  0.3),
+            new Vector2D(-9,  0.3)
         };
+        rigidBodies.add(RigidBody.createStatic(floorVertices, new Vector2D(0, -5), 0));
 
-        // Create the first square at origin with mass 1.0 and no rotation
-        Vector2D initialPos1 = new Vector2D(0, -1);
-        double mass = 1.0;
-        double initialOrientation = 0.0;
+        // Immovable side walls
+        Vector2D[] wallVertices = new Vector2D[]{
+            new Vector2D(-0.3, -7),
+            new Vector2D( 0.3, -7),
+            new Vector2D( 0.3,  7),
+            new Vector2D(-0.3,  7)
+        };
+        rigidBodies.add(RigidBody.createStatic(wallVertices, new Vector2D(-8.3, 0), 0)); // left wall
+        rigidBodies.add(RigidBody.createStatic(wallVertices, new Vector2D( 8.3, 0), 0)); // right wall
 
-        RigidBody square1 = new RigidBody(squareVertices, mass, initialPos1, initialOrientation);
+        // Heavy central hexagon — the "bumper" everything crashes into
+        Vector2D[] hexVertices = regularPolygon(6, 0.9);
+        RigidBody hex = new RigidBody(hexVertices, 6.0, new Vector2D(0, 0), 0);
+        addGravity(hex, 6.0);
+        rigidBodies.add(hex);
 
-        // Apply downward gravitational force at the center of mass (origin in body-space)
-        // Force = mass * g, directed downward (negative Y direction)
-        Vector2D forceVector = new Vector2D(0, -mass * GRAVITY);
-        Vector2D applicationPoint = new Vector2D(0, 0); // Center of mass in body-space
-        Force gravityForce = new Force(forceVector, applicationPoint);
-        square1.applyForce(gravityForce);
+        // Thin plank sliding in fast from the right
+        Vector2D[] plankVertices = {
+            new Vector2D(-1.2, -0.2), new Vector2D(1.2, -0.2),
+            new Vector2D( 1.2,  0.2), new Vector2D(-1.2, 0.2)
+        };
+        RigidBody plank = new RigidBody(plankVertices, 1.5, new Vector2D(6, -1), Math.PI / 10);
+        plank.setVelocity(new Vector2D(-5.0, 0.5));
+        addGravity(plank, 1.5);
+        rigidBodies.add(plank);
 
-        rigidBodies.add(square1);
+        // Tall domino dropping near the right side
+        Vector2D[] dominoVertices = {
+            new Vector2D(-0.2, -0.7), new Vector2D(0.2, -0.7),
+            new Vector2D( 0.2,  0.7), new Vector2D(-0.2, 0.7)
+        };
+        RigidBody domino = new RigidBody(dominoVertices, 0.9, new Vector2D(5.5, 3), 0.15);
+        domino.setVelocity(new Vector2D(-1.0, -0.5));
+        addGravity(domino, 0.9);
+        rigidBodies.add(domino);
 
-        // Create a second square body positioned directly above square1, with downward velocity to ensure collision
-        Vector2D initialPos2 = new Vector2D(0, 2);
-        RigidBody square2 = new RigidBody(squareVertices, mass, initialPos2, initialOrientation);
+        // Trapezoid (wide base, narrow top) falling from the upper-left
+        Vector2D[] trapVertices = {
+            new Vector2D(-0.9, -0.4), new Vector2D( 0.9, -0.4),
+            new Vector2D( 0.4,  0.4), new Vector2D(-0.4,  0.4)
+        };
+        RigidBody trap = new RigidBody(trapVertices, 1.4, new Vector2D(-2, 5), -0.2);
+        trap.setVelocity(new Vector2D(1.5, -3.0));
+        trap.setAngularVelocity(0.9);
+        addGravity(trap, 1.4);
+        rigidBodies.add(trap);
 
-        // Set initial downward velocity to ensure collision
-        square2.setVelocity(new Vector2D(0, -3.0)); // Moving downward at 3 m/s
+        // 5-pointed star (concave) flying in from the upper-left with spin
+        Vector2D[] starVertices = star(0.7, 0.28, 5);
+        RigidBody starBody = new RigidBody(starVertices, 1.0, new Vector2D(-6, 4), 0.0);
+        starBody.setVelocity(new Vector2D(3.0, -1.5));
+        starBody.setAngularVelocity(-1.2);
+        addGravity(starBody, 1.0);
+        rigidBodies.add(starBody);
 
-        // Apply gravity to the second square as well
-        Force gravityForce2 = new Force(forceVector, applicationPoint);
-        square2.applyForce(gravityForce2);
+        // Right-pointing arrow (concave V-notch at the back) shot from the lower-right
+        Vector2D[] arrowVertices = {
+            new Vector2D( 0.9,  0.0),  // tip
+            new Vector2D( 0.1,  0.55), // upper wing
+            new Vector2D( 0.1,  0.22), // inner upper notch
+            new Vector2D(-0.9,  0.22), // back upper
+            new Vector2D(-0.9, -0.22), // back lower
+            new Vector2D( 0.1, -0.22), // inner lower notch
+            new Vector2D( 0.1, -0.55)  // lower wing
+        };
+        RigidBody arrow = new RigidBody(arrowVertices, 1.1, new Vector2D(5, -3), 0.0);
+        arrow.setVelocity(new Vector2D(-4.0, 4.0));
+        arrow.setAngularVelocity(1.8);
+        addGravity(arrow, 1.1);
+        rigidBodies.add(arrow);
+    }
 
-        rigidBodies.add(square2);
+    /**
+     * Returns vertices for a star polygon with the given point count, wound CCW.
+     * Alternates between outerRadius (tips) and innerRadius (notches).
+     */
+    private static Vector2D[] star(double outerRadius, double innerRadius, int points) {
+        int n = points * 2;
+        Vector2D[] verts = new Vector2D[n];
+        for (int i = 0; i < n; i++) {
+            // Start from the top (π/2) and step CCW in equal angular increments
+            double angle = Math.PI / 2.0 + 2.0 * Math.PI * i / n;
+            double r = (i % 2 == 0) ? outerRadius : innerRadius;
+            verts[i] = new Vector2D(r * Math.cos(angle), r * Math.sin(angle));
+        }
+        return verts;
+    }
+
+    /** Returns vertices for a regular n-gon with the given radius, wound CCW. */
+    private static Vector2D[] regularPolygon(int sides, double radius) {
+        Vector2D[] verts = new Vector2D[sides];
+        for (int i = 0; i < sides; i++) {
+            double angle = 2 * Math.PI * i / sides;
+            verts[i] = new Vector2D(radius * Math.cos(angle), radius * Math.sin(angle));
+        }
+        return verts;
+    }
+
+    private void addGravity(RigidBody body, double mass) {
+        body.applyForce(new Force(new Vector2D(0, -mass * GRAVITY), new Vector2D(0, 0)));
     }
 
     @Override

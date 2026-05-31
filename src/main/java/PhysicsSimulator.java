@@ -1,3 +1,4 @@
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -5,8 +6,11 @@ import java.util.List;
  * Uses vertex-to-edge collision detection and impulse-based collision response.
  */
 public class PhysicsSimulator {
-    private static final double COLLISION_EPSILON = 1e-6; // Small epsilon to avoid duplicate collisions
-    private static final int MAX_COLLISIONS_PER_FRAME = 100; // Prevent infinite loops
+    private static final double COLLISION_EPSILON = 1e-6;
+    private static final int MAX_COLLISIONS_PER_FRAME = 100;
+    private static final double CONTACT_SKIN = 0.05;
+    // Below this approach speed, restitution is set to zero so slow contacts settle rather than bounce.
+    private static final double RESTITUTION_VELOCITY_THRESHOLD = 0.5;
 
     /**
      * Simulates a single time step, handling collisions.
@@ -16,43 +20,41 @@ public class PhysicsSimulator {
      * @param timeRemaining Time step to simulate (in seconds)
      */
     public void simulateTimeStep(List<RigidBody> rigidBodies, double timeRemaining) {
+        for (RigidBody body : rigidBodies) body.clearTemporaryForces();
+        detectAndApplyFriction(rigidBodies, timeRemaining);
+
+        // Phase 1: advance time, resolving CCD collisions as they occur
         int collisionCount = 0;
-
         while (timeRemaining > COLLISION_EPSILON && collisionCount < MAX_COLLISIONS_PER_FRAME) {
-            // Find the next collision within the entire remaining time
-            CollisionInfo nextCollision = findNextCollision(rigidBodies, timeRemaining);
+            List<CollisionInfo> nextCollisions = findNextCollisions(rigidBodies, timeRemaining);
 
-            if (nextCollision == null) {
-                // No more collisions; step all bodies to the end
-                for (RigidBody body : rigidBodies) {
-                    body.stepTime(timeRemaining);
-                }
-
-                // After stepping, check for any penetrating pairs that were missed by CCD and resolve them
-                if (checkAndResolveOverlap(rigidBodies)) {
-                    // If we resolved an overlap, continue the loop to allow additional collisions within the same frame
-                    collisionCount++;
-                    // We consumed the whole remaining time (we stepped by timeRemaining)
-                    timeRemaining = 0;
-                    continue;
-                }
-
+            if (nextCollisions.isEmpty()) {
+                for (RigidBody body : rigidBodies) body.stepTime(timeRemaining);
+                timeRemaining = 0;
                 break;
             }
 
-            // Step all bodies to the collision time
-            for (RigidBody body : rigidBodies) {
-                body.stepTime(nextCollision.collisionTime);
+            double collisionTime = nextCollisions.get(0).collisionTime;
+            for (RigidBody body : rigidBodies) body.stepTime(collisionTime);
+            for (CollisionInfo collision : nextCollisions) {
+                handleCollision(collision.bodyA, collision.bodyB,
+                                collision.vertexA, collision.collisionNormal);
             }
-
-            // Handle the collision
-            handleCollision(nextCollision.bodyA, nextCollision.bodyB,
-                          nextCollision.vertexA, nextCollision.collisionNormal);
-
-            // Update time remaining
-            timeRemaining -= nextCollision.collisionTime;
+            timeRemaining -= collisionTime;
             collisionCount++;
         }
+
+        // If MAX_COLLISIONS_PER_FRAME was hit, consume whatever time remains so the
+        // clock always advances by the full step.
+        if (timeRemaining > COLLISION_EPSILON) {
+            for (RigidBody body : rigidBodies) body.stepTime(timeRemaining);
+        }
+
+        // Phase 2: resolve ALL penetrations left over after time has advanced.
+        // Loop until clean (or a safety cap), so multi-body pile-ups are fully resolved
+        // in a single step rather than one body per step.
+        int overlapIter = 0;
+        while (checkAndResolveOverlap(rigidBodies) && overlapIter++ < 20);
     }
 
     /**
@@ -63,30 +65,33 @@ public class PhysicsSimulator {
      * @param timeRemaining Maximum time to look ahead
      * @return CollisionInfo of the next collision, or null if no collision
      */
-    private CollisionInfo findNextCollision(List<RigidBody> rigidBodies, double timeRemaining) {
-        CollisionInfo earliestCollision = null;
+    private List<CollisionInfo> findNextCollisions(List<RigidBody> rigidBodies, double timeRemaining) {
+        double earliestTime = Double.MAX_VALUE;
+        List<CollisionInfo> simultaneous = new ArrayList<>();
 
-        // Check all pairs of bodies
         for (int i = 0; i < rigidBodies.size(); i++) {
             for (int j = i + 1; j < rigidBodies.size(); j++) {
                 RigidBody bodyA = rigidBodies.get(i);
                 RigidBody bodyB = rigidBodies.get(j);
 
-                // Check all vertices of bodyA against all edges of bodyB
-                CollisionInfo collision = findVertexEdgeCollision(bodyA, bodyB, timeRemaining);
-                if (collision != null && (earliestCollision == null || collision.collisionTime < earliestCollision.collisionTime)) {
-                    earliestCollision = collision;
-                }
+                CollisionInfo colAB = findVertexEdgeCollision(bodyA, bodyB, timeRemaining);
+                CollisionInfo colBA = findVertexEdgeCollision(bodyB, bodyA, timeRemaining);
 
-                // Check all vertices of bodyB against all edges of bodyA
-                collision = findVertexEdgeCollision(bodyB, bodyA, timeRemaining);
-                if (collision != null && (earliestCollision == null || collision.collisionTime < earliestCollision.collisionTime)) {
-                    earliestCollision = collision;
+                for (CollisionInfo collision : new CollisionInfo[]{colAB, colBA}) {
+                    if (collision == null) continue;
+
+                    if (collision.collisionTime < earliestTime - COLLISION_EPSILON) {
+                        earliestTime = collision.collisionTime;
+                        simultaneous.clear();
+                        simultaneous.add(collision);
+                    } else if (collision.collisionTime <= earliestTime + COLLISION_EPSILON) {
+                        simultaneous.add(collision);
+                    }
                 }
             }
         }
 
-        return earliestCollision;
+        return simultaneous;
     }
 
     /**
@@ -101,7 +106,10 @@ public class PhysicsSimulator {
     private CollisionInfo findVertexEdgeCollision(RigidBody bodyA, RigidBody bodyB, double timeRemaining) {
         Vector2D[] verticesA = bodyA.getVertices();
         Vector2D[] verticesB = bodyB.getVertices();
-        CollisionInfo earliestCollision = null;
+
+        double earliestTime = Double.MAX_VALUE;
+        Vector2D earliestNormal = null;
+        List<Vector2D> contactVertices = new ArrayList<>();
 
         for (int v = 0; v < verticesA.length; v++) {
             Vector2D vertexA = verticesA[v];
@@ -114,13 +122,38 @@ public class PhysicsSimulator {
                     bodyA, bodyB, vertexA, edgeStart, edgeEnd, timeRemaining
                 );
 
-                if (collision != null && (earliestCollision == null || collision.collisionTime < earliestCollision.collisionTime)) {
-                    earliestCollision = collision;
+                if (collision == null) continue;
+
+                if (collision.collisionTime < earliestTime - COLLISION_EPSILON) {
+                    // Strictly earlier: start a new contact manifold
+                    earliestTime = collision.collisionTime;
+                    earliestNormal = collision.collisionNormal;
+                    contactVertices.clear();
+                    contactVertices.add(vertexA);
+                } else if (collision.collisionTime <= earliestTime + COLLISION_EPSILON) {
+                    // Simultaneous: add to the contact manifold (avoid duplicates)
+                    if (earliestNormal == null) {
+                        earliestNormal = collision.collisionNormal;
+                        earliestTime = collision.collisionTime;
+                    }
+                    boolean duplicate = false;
+                    for (Vector2D cv : contactVertices) {
+                        if (cv == vertexA) { duplicate = true; break; }
+                    }
+                    if (!duplicate) contactVertices.add(vertexA);
                 }
             }
         }
 
-        return earliestCollision;
+        if (contactVertices.isEmpty()) return null;
+
+        // Average simultaneous contact vertices into a single contact point to prevent
+        // spurious torque on symmetric face-face collisions.
+        double sumX = 0, sumY = 0;
+        for (Vector2D v : contactVertices) { sumX += v.getX(); sumY += v.getY(); }
+        Vector2D avgContact = new Vector2D(sumX / contactVertices.size(), sumY / contactVertices.size());
+
+        return new CollisionInfo(bodyA, bodyB, avgContact, earliestNormal, earliestTime);
     }
 
     /**
@@ -129,7 +162,6 @@ public class PhysicsSimulator {
      *
      * @param bodyA Body containing the vertex
      * @param bodyB Body containing the edge
-     * @param vertexIndex Index of the vertex in bodyA
      * @param vertexBody Body-space position of vertex
      * @param edgeStart Body-space start of edge in bodyB
      * @param edgeEnd Body-space end of edge in bodyB
@@ -287,8 +319,10 @@ public class PhysicsSimulator {
             return;
         }
 
-        // Average coefficient of restitution
-        double e = (bodyA.getCoefficientOfRestitution() + bodyB.getCoefficientOfRestitution()) / 2.0;
+        // Use zero restitution for slow impacts so resting contacts settle instead of micro-bouncing.
+        double e = (Math.abs(relativeVelNormal) < RESTITUTION_VELOCITY_THRESHOLD)
+                   ? 0.0
+                   : (bodyA.getCoefficientOfRestitution() + bodyB.getCoefficientOfRestitution()) / 2.0;
 
         // Get position vectors from body centers to collision point (in world-space)
         Vector2D r_A = bodySpaceToWorldSpace(bodyA, vertexA).subtract(bodyA.getWorldPos());
@@ -297,111 +331,241 @@ public class PhysicsSimulator {
         // Calculate impulse magnitude using the impulse-momentum equations
         // j = -(1 + e) * (v_rel · n) / (1/m_a + 1/m_b + (r_a × n)^2 / I_a + (r_b × n)^2 / I_b)
 
-        double m_a = bodyA.getMass();
-        double m_b = bodyB.getMass();
-        double I_a = bodyA.getMomentOfInertia();
-        double I_b = bodyB.getMomentOfInertia();
+        // Static bodies contribute 0 to the inverse-mass terms (infinite effective mass)
+        double invMa = bodyA.isStatic() ? 0.0 : 1.0 / bodyA.getMass();
+        double invMb = bodyB.isStatic() ? 0.0 : 1.0 / bodyB.getMass();
+        double invIa = bodyA.isStatic() ? 0.0 : 1.0 / bodyA.getMomentOfInertia();
+        double invIb = bodyB.isStatic() ? 0.0 : 1.0 / bodyB.getMomentOfInertia();
 
         // Cross products (in 2D, a × b gives a scalar)
         double r_a_cross_n = r_A.getX() * normal.getY() - r_A.getY() * normal.getX();
         double r_b_cross_n = r_B.getX() * normal.getY() - r_B.getY() * normal.getX();
 
-        double denominator = (1.0 / m_a) + (1.0 / m_b) +
-                           (r_a_cross_n * r_a_cross_n) / I_a +
-                           (r_b_cross_n * r_b_cross_n) / I_b;
+        double denominator = invMa + invMb +
+                             (r_a_cross_n * r_a_cross_n) * invIa +
+                             (r_b_cross_n * r_b_cross_n) * invIb;
 
         double j = -(1.0 + e) * relativeVelNormal / denominator;
 
         // Apply impulse: J = j * n
         Vector2D impulse = normal.scale(j);
 
-        // Update velocities
-        Vector2D newVelA = bodyA.getVelocity().add(impulse.scale(1.0 / m_a));
-        Vector2D newVelB = bodyB.getVelocity().add(impulse.scale(-1.0 / m_b));
+        // Update velocities (static bodies ignore the impulse)
+        if (!bodyA.isStatic()) {
+            bodyA.setVelocity(bodyA.getVelocity().add(impulse.scale(invMa)));
+            bodyA.setAngularVelocity(bodyA.getAngularVelocity() + r_a_cross_n * j * invIa);
+        }
+        if (!bodyB.isStatic()) {
+            bodyB.setVelocity(bodyB.getVelocity().add(impulse.scale(-invMb)));
+            bodyB.setAngularVelocity(bodyB.getAngularVelocity() - r_b_cross_n * j * invIb);
+        }
 
-        bodyA.setVelocity(newVelA);
-        bodyB.setVelocity(newVelB);
+    }
 
-        // Update angular velocities
-        double newAngularVelA = bodyA.getAngularVelocity() + r_a_cross_n * j / I_a;
-        double newAngularVelB = bodyB.getAngularVelocity() - r_b_cross_n * j / I_b;
+    private void detectAndApplyFriction(List<RigidBody> bodies, double dt) {
+        for (int i = 0; i < bodies.size(); i++) {
+            for (int j = i + 1; j < bodies.size(); j++) {
+                applyFrictionForPair(bodies.get(i), bodies.get(j), dt);
+                applyFrictionForPair(bodies.get(j), bodies.get(i), dt);
+            }
+        }
+    }
 
-        bodyA.setAngularVelocity(newAngularVelA);
-        bodyB.setAngularVelocity(newAngularVelB);
+    private void applyFrictionForPair(RigidBody bodyA, RigidBody bodyB, double dt) {
+        if (bodyA.isStatic()) return;
+
+        Vector2D[] vertsA = bodyA.getVertices();
+        Vector2D[] vertsB = bodyB.getVertices();
+
+        // Collect contact vertices and determine the dominant contact normal
+        List<Vector2D> contactBodyVerts = new ArrayList<>();
+        Vector2D contactNormal = null;
+        double bestAbsDist = Double.MAX_VALUE;
+
+        for (Vector2D vBody : vertsA) {
+            Vector2D vWorld = bodySpaceToWorldSpace(bodyA, vBody);
+
+            for (int e = 0; e < vertsB.length; e++) {
+                Vector2D e0w = bodySpaceToWorldSpace(bodyB, vertsB[e]);
+                Vector2D e1w = bodySpaceToWorldSpace(bodyB, vertsB[(e + 1) % vertsB.length]);
+
+                Vector2D edgeVec = e1w.subtract(e0w);
+                double edgeMag = edgeVec.magnitude();
+                if (edgeMag < COLLISION_EPSILON) continue;
+
+                // Outward edge normal (CW rotation for CCW polygon)
+                Vector2D edgeNormal = new Vector2D(edgeVec.getY(), -edgeVec.getX()).scale(1.0 / edgeMag);
+
+                // Signed distance: positive = outside, negative = inside
+                double dist = vWorld.subtract(e0w).dot(edgeNormal);
+                if (dist < -CONTACT_SKIN || dist > CONTACT_SKIN) continue;
+
+                // Check vertex projects onto the edge segment (not past the endpoints)
+                double along = vWorld.subtract(e0w).dot(edgeVec) / (edgeMag * edgeMag);
+                if (along < 0 || along > 1) continue;
+
+                contactBodyVerts.add(vBody);
+                if (Math.abs(dist) < bestAbsDist) {
+                    bestAbsDist = Math.abs(dist);
+                    contactNormal = edgeNormal;
+                }
+                break; // One edge per vertex is enough
+            }
+        }
+
+        if (contactBodyVerts.isEmpty() || contactNormal == null) return;
+
+        // Average contact point in body A's body space
+        double sx = 0, sy = 0;
+        for (Vector2D v : contactBodyVerts) { sx += v.getX(); sy += v.getY(); }
+        Vector2D avgContactA = new Vector2D(sx / contactBodyVerts.size(), sy / contactBodyVerts.size());
+
+        // Normal force = component of permanent applied forces on A pressing into B.
+        // Uses only permanent forces so friction doesn't depend on itself.
+        Vector2D totalPermForce = new Vector2D(0, 0);
+        for (Force f : bodyA.getAppliedForces()) totalPermForce = totalPermForce.add(f.getForceVector());
+        double normalForce = -totalPermForce.dot(contactNormal); // Positive when pressing into B
+        if (normalForce <= 0) return;
+
+        // Relative tangential velocity at the contact point
+        Vector2D velA = getPointVelocity(bodyA, avgContactA);
+        Vector2D contactWorld = bodySpaceToWorldSpace(bodyA, avgContactA);
+        Vector2D relToCenterB = contactWorld.subtract(bodyB.getWorldPos());
+        Vector2D contactBBody = relToCenterB.rotate(-bodyB.getWorldOrientation());
+        Vector2D velB = getPointVelocity(bodyB, contactBBody);
+
+        Vector2D relVel = velA.subtract(velB);
+        Vector2D tangentialRelVel = relVel.subtract(contactNormal.scale(relVel.dot(contactNormal)));
+        double tangentSpeed = tangentialRelVel.magnitude();
+        if (tangentSpeed < 1e-4) return; // No meaningful sliding
+
+        Vector2D tangent = tangentialRelVel.scale(1.0 / tangentSpeed);
+        double mu = (bodyA.getCoefficientOfKineticFriction() + bodyB.getCoefficientOfKineticFriction()) / 2.0;
+
+        // Effective mass at the contact point in the tangential direction.
+        // Caps the friction force so it can decelerate the sliding to zero in one step
+        // but never overshoot — prevents oscillation of nearly-stationary bodies.
+        Vector2D r_A = contactWorld.subtract(bodyA.getWorldPos());
+        Vector2D r_B = contactWorld.subtract(bodyB.getWorldPos());
+        double invMa = bodyA.isStatic() ? 0.0 : 1.0 / bodyA.getMass();
+        double invMb = bodyB.isStatic() ? 0.0 : 1.0 / bodyB.getMass();
+        double invIa = bodyA.isStatic() ? 0.0 : 1.0 / bodyA.getMomentOfInertia();
+        double invIb = bodyB.isStatic() ? 0.0 : 1.0 / bodyB.getMomentOfInertia();
+        double r_a_cross_t = r_A.getX() * tangent.getY() - r_A.getY() * tangent.getX();
+        double r_b_cross_t = r_B.getX() * tangent.getY() - r_B.getY() * tangent.getX();
+        double effMassDenom = invMa + invMb + r_a_cross_t * r_a_cross_t * invIa + r_b_cross_t * r_b_cross_t * invIb;
+        double mEff = (effMassDenom > COLLISION_EPSILON) ? 1.0 / effMassDenom : 0.0;
+
+        double frictionMagnitude = Math.min(mu * normalForce, tangentSpeed * mEff / dt);
+
+        Vector2D frictionForce = tangent.scale(-frictionMagnitude);
+        bodyA.applyTemporaryForce(new Force(frictionForce, avgContactA));
+
+        // Reaction force on bodyB at the corresponding contact point
+        if (!bodyB.isStatic()) {
+            bodyB.applyTemporaryForce(new Force(frictionForce.scale(-1.0), contactBBody));
+        }
     }
 
     // Check for overlapping polygons after stepping and resolve first found penetration via an impulse
     private boolean checkAndResolveOverlap(List<RigidBody> bodies) {
+        boolean anyResolved = false;
         for (int i = 0; i < bodies.size(); i++) {
             RigidBody A = bodies.get(i);
+            if (A.isStatic()) continue;
             Vector2D[] vertsA = A.getVertices();
             for (int j = 0; j < bodies.size(); j++) {
                 if (i == j) continue;
                 RigidBody B = bodies.get(j);
                 Vector2D[] vertsB = B.getVertices();
 
-                // Build world-space vertex arrays for B once
                 Vector2D[] worldB = new Vector2D[vertsB.length];
                 for (int k = 0; k < vertsB.length; k++) worldB[k] = bodySpaceToWorldSpace(B, vertsB[k]);
 
-                // For each vertex of A, check if it's inside polygon B
+                // Collect all vertices of A that are inside B
+                List<Vector2D> contactBodyVerts = new ArrayList<>();
+                double maxDepth = 0;
+                Vector2D resolveNormal = null;
+
                 for (int va = 0; va < vertsA.length; va++) {
                     Vector2D vBody = vertsA[va];
                     Vector2D vWorld = bodySpaceToWorldSpace(A, vBody);
-                    if (pointInPolygon(vWorld, worldB)) {
-                        System.out.println("PENETRATION: A vertex isclosed in B");
-                        // Find closest edge on B to this point and compute normal from edge to point
-                        int closestEdgeIdx = -1;
-                        double bestDistSq = Double.MAX_VALUE;
-                        Vector2D bestNormal = null;
-                        for (int eb = 0; eb < worldB.length; eb++) {
-                            Vector2D e0 = worldB[eb];
-                            Vector2D e1 = worldB[(eb + 1) % worldB.length];
-                            // project vWorld onto edge segment
-                            Vector2D edge = e1.subtract(e0);
-                            double edgeLenSq = edge.dot(edge);
-                            double t = 0;
-                            if (edgeLenSq > 0) {
-                                t = vWorld.subtract(e0).dot(edge) / edgeLenSq;
-                                t = Math.max(0, Math.min(1, t));
-                            }
-                            Vector2D proj = new Vector2D(e0.getX() + t * edge.getX(), e0.getY() + t * edge.getY());
-                            Vector2D diff = vWorld.subtract(proj);
-                            double distSq = diff.dot(diff);
-                            if (distSq < bestDistSq) {
-                                bestDistSq = distSq;
-                                closestEdgeIdx = eb;
-                                // normal is from edge to point
-                                if (distSq > 0) {
-                                    bestNormal = diff.scale(1.0 / Math.sqrt(distSq));
-                                } else {
-                                    // Degenerate: fallback to edge normal
-                                    bestNormal = new Vector2D(-edge.getY(), edge.getX()).normalize();
-                                }
-                            }
+                    if (!pointInPolygon(vWorld, worldB)) continue;
+
+                    // Find closest edge on B to get outward normal and depth for this vertex
+                    double bestDistSq = Double.MAX_VALUE;
+                    Vector2D bestNormal = null;
+                    for (int eb = 0; eb < worldB.length; eb++) {
+                        Vector2D e0 = worldB[eb];
+                        Vector2D e1 = worldB[(eb + 1) % worldB.length];
+                        Vector2D edge = e1.subtract(e0);
+                        double edgeLenSq = edge.dot(edge);
+                        double t = 0;
+                        if (edgeLenSq > 0) {
+                            t = vWorld.subtract(e0).dot(edge) / edgeLenSq;
+                            t = Math.max(0, Math.min(1, t));
                         }
-
-                        if (closestEdgeIdx != -1 && bestNormal != null) {
-                            // Resolve by applying an impulse at the penetrating vertex
-                            // Get the velocity of the penetrating vertex along the normal
-                            Vector2D vertexVel = getPointVelocity(A, vBody);
-                            double velAlongNormal = vertexVel.dot(bestNormal);
-
-                            // Only apply impulse if the vertex is moving into body B, or if it's barely separating/parallel
-                            if (velAlongNormal < 0.1) { // Allow small positive velocity due to numerical errors
-                                handleCollision(A, B, vBody, bestNormal);
+                        Vector2D proj = new Vector2D(e0.getX() + t * edge.getX(), e0.getY() + t * edge.getY());
+                        Vector2D diff = vWorld.subtract(proj);
+                        double distSq = diff.dot(diff);
+                        if (distSq < bestDistSq) {
+                            bestDistSq = distSq;
+                            if (distSq > 0) {
+                                bestNormal = diff.scale(-1.0 / Math.sqrt(distSq));
                             } else {
-                                // If clearly moving away, just separate the bodies
-                                // Push A away from B
-                                A.setWorldPos(A.getWorldPos().add(bestNormal.scale(0.01)));
+                                bestNormal = new Vector2D(edge.getY(), -edge.getX()).normalize();
                             }
-                            return true;
                         }
                     }
+
+                    if (bestNormal == null) continue;
+                    contactBodyVerts.add(vBody);
+
+                    // Track the deepest penetration — its normal and depth drive the correction
+                    double depth = Math.sqrt(bestDistSq);
+                    if (resolveNormal == null || depth > maxDepth) {
+                        maxDepth = depth;
+                        resolveNormal = bestNormal;
+                    }
                 }
+
+                if (contactBodyVerts.isEmpty()) continue;
+
+                // Average all penetrating vertices into a single contact point (eliminates
+                // spurious torque on flat-face contacts, same as the CCD fix).
+                double sumX = 0, sumY = 0;
+                for (Vector2D v : contactBodyVerts) { sumX += v.getX(); sumY += v.getY(); }
+                Vector2D avgContact = new Vector2D(sumX / contactBodyVerts.size(), sumY / contactBodyVerts.size());
+
+                // Position correction: push body out by the worst penetration depth
+                A.setWorldPos(A.getWorldPos().add(resolveNormal.scale(maxDepth)));
+
+                // Velocity correction:
+                // Normally let handleCollision handle everything so angular dynamics
+                // play out naturally (off-center impulse tips corner-resting bodies over).
+                // The one exception: if the center is approaching the surface but spin
+                // makes the contact POINT appear to separate, handleCollision would skip
+                // the impulse entirely and the body would sink. Zero the center velocity
+                // only in that specific case.
+                Vector2D vel = A.getVelocity();
+                double centerApproach  = vel.dot(resolveNormal);
+                Vector2D contactVel    = getPointVelocity(A, avgContact);
+                double contactApproach = contactVel.dot(resolveNormal);
+
+                if (!A.isStatic() && centerApproach < 0 && contactApproach >= 0) {
+                    A.setVelocity(vel.subtract(resolveNormal.scale(centerApproach)));
+                    contactVel = getPointVelocity(A, avgContact);
+                }
+
+                if (contactVel.dot(resolveNormal) < 0) {
+                    handleCollision(A, B, avgContact, resolveNormal);
+                }
+                anyResolved = true;
+                // Do NOT return — continue checking remaining pairs so all penetrations
+                // are resolved in a single pass rather than one per simulateTimeStep call.
             }
         }
-        return false;
+        return anyResolved;
     }
 
     // Ray-casting point-in-polygon test
