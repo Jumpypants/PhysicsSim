@@ -1,3 +1,5 @@
+package com.physicssim;
+
 public class Force {
     private final Vector2D forceVector; // In world-space
     private final Vector2D applicationPoint; // Relative to the origin in body-space

@@ -1,3 +1,10 @@
+package com.physicssim.demo;
+
+import com.physicssim.Force;
+import com.physicssim.PhysicsSimulator;
+import com.physicssim.RigidBody;
+import com.physicssim.Vector2D;
+
 import javax.swing.*;
 import java.awt.*;
 import java.util.ArrayList;

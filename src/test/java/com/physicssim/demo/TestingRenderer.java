@@ -1,3 +1,9 @@
+package com.physicssim.demo;
+
+import com.physicssim.Force;
+import com.physicssim.RigidBody;
+import com.physicssim.Vector2D;
+
 import java.awt.*;
 import java.util.List;
 
@@ -76,7 +82,7 @@ public class TestingRenderer {
         }
 
         // Draw applied forces: a small circle at the application point and an arrow representing the force vector
-        java.util.List<Force> forces = body.getAppliedForces();
+        List<Force> forces = body.getAppliedForces();
         if (forces != null && !forces.isEmpty()) {
             for (Force f : forces) {
                 // Application point is in body-space; transform to screen-space

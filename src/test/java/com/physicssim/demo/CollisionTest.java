@@ -1,3 +1,9 @@
+package com.physicssim.demo;
+
+import com.physicssim.PhysicsSimulator;
+import com.physicssim.RigidBody;
+import com.physicssim.Vector2D;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -80,10 +86,3 @@ public class CollisionTest {
         System.out.println("  Square 2: Y=" + square2.getWorldPos().getY() + ", VY=" + square2.getVelocity().getY());
     }
 }
-
-
-
-
-
-
-

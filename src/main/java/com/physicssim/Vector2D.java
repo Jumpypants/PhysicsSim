@@ -1,3 +1,5 @@
+package com.physicssim;
+
 public class Vector2D {
     private double x;
     private double y;
@@ -42,7 +44,7 @@ public class Vector2D {
     public Vector2D normalize() {
         double mag = magnitude();
         if (mag == 0) {
-            return new Vector2D(0, 0); // Can't normalize a zero vector
+            return new Vector2D(0, 0);
         }
         return new Vector2D(x / mag, y / mag);
     }
@@ -60,5 +62,10 @@ public class Vector2D {
         double cos = Math.cos(angle);
         double sin = Math.sin(angle);
         return new Vector2D(this.x * cos - this.y * sin, this.x * sin + this.y * cos);
+    }
+
+    @Override
+    public String toString() {
+        return "(" + x + ", " + y + ")";
     }
 }

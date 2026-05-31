@@ -1,3 +1,5 @@
+package com.physicssim;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -76,6 +78,21 @@ public class PhysicsSimulator {
 
                 CollisionInfo colAB = findVertexEdgeCollision(bodyA, bodyB, timeRemaining);
                 CollisionInfo colBA = findVertexEdgeCollision(bodyB, bodyA, timeRemaining);
+
+                // Edge-edge contact: both directions fire simultaneously with conflicting normals.
+                // Applying both impulses produces erratic results, so keep only the one whose
+                // normal most strongly opposes the current approach velocity.
+                if (colAB != null && colBA != null &&
+                        Math.abs(colAB.collisionTime - colBA.collisionTime) <= COLLISION_EPSILON) {
+                    Vector2D relVel = bodyA.getVelocity().subtract(bodyB.getVelocity());
+                    double approachAB = relVel.dot(colAB.collisionNormal);
+                    double approachBA = relVel.scale(-1).dot(colBA.collisionNormal);
+                    if (approachAB <= approachBA) {
+                        colBA = null;
+                    } else {
+                        colAB = null;
+                    }
+                }
 
                 for (CollisionInfo collision : new CollisionInfo[]{colAB, colBA}) {
                     if (collision == null) continue;
@@ -467,7 +484,9 @@ public class PhysicsSimulator {
         }
     }
 
-    // Check for overlapping polygons after stepping and resolve first found penetration via an impulse
+    // Detect and resolve all pairwise overlaps using full SAT.
+    // Unlike the old vertex-in-polygon approach, SAT catches edge-edge intersections
+    // where no vertex of A is inside B — the case that caused bodies to sink through each other.
     private boolean checkAndResolveOverlap(List<RigidBody> bodies) {
         boolean anyResolved = false;
         for (int i = 0; i < bodies.size(); i++) {
@@ -479,74 +498,44 @@ public class PhysicsSimulator {
                 RigidBody B = bodies.get(j);
                 Vector2D[] vertsB = B.getVertices();
 
+                Vector2D[] worldA = new Vector2D[vertsA.length];
                 Vector2D[] worldB = new Vector2D[vertsB.length];
+                for (int k = 0; k < vertsA.length; k++) worldA[k] = bodySpaceToWorldSpace(A, vertsA[k]);
                 for (int k = 0; k < vertsB.length; k++) worldB[k] = bodySpaceToWorldSpace(B, vertsB[k]);
 
-                // Collect all vertices of A that are inside B
-                List<Vector2D> contactBodyVerts = new ArrayList<>();
-                double maxDepth = 0;
-                Vector2D resolveNormal = null;
+                double[] sat = satPenetration(worldA, worldB, A.getWorldPos(), B.getWorldPos());
+                if (sat == null) continue; // Separating axis found — no overlap
 
-                for (int va = 0; va < vertsA.length; va++) {
-                    Vector2D vBody = vertsA[va];
-                    Vector2D vWorld = bodySpaceToWorldSpace(A, vBody);
-                    if (!pointInPolygon(vWorld, worldB)) continue;
+                double depth = sat[0];
+                Vector2D resolveNormal = new Vector2D(sat[1], sat[2]);
 
-                    // Find closest edge on B to get outward normal and depth for this vertex
-                    double bestDistSq = Double.MAX_VALUE;
-                    Vector2D bestNormal = null;
-                    for (int eb = 0; eb < worldB.length; eb++) {
-                        Vector2D e0 = worldB[eb];
-                        Vector2D e1 = worldB[(eb + 1) % worldB.length];
-                        Vector2D edge = e1.subtract(e0);
-                        double edgeLenSq = edge.dot(edge);
-                        double t = 0;
-                        if (edgeLenSq > 0) {
-                            t = vWorld.subtract(e0).dot(edge) / edgeLenSq;
-                            t = Math.max(0, Math.min(1, t));
-                        }
-                        Vector2D proj = new Vector2D(e0.getX() + t * edge.getX(), e0.getY() + t * edge.getY());
-                        Vector2D diff = vWorld.subtract(proj);
-                        double distSq = diff.dot(diff);
-                        if (distSq < bestDistSq) {
-                            bestDistSq = distSq;
-                            if (distSq > 0) {
-                                bestNormal = diff.scale(-1.0 / Math.sqrt(distSq));
-                            } else {
-                                bestNormal = new Vector2D(edge.getY(), -edge.getX()).normalize();
-                            }
-                        }
-                    }
-
-                    if (bestNormal == null) continue;
-                    contactBodyVerts.add(vBody);
-
-                    // Track the deepest penetration — its normal and depth drive the correction
-                    double depth = Math.sqrt(bestDistSq);
-                    if (resolveNormal == null || depth > maxDepth) {
-                        maxDepth = depth;
-                        resolveNormal = bestNormal;
-                    }
+                // Contact point: the most-penetrating vertices of A (smallest projection
+                // onto resolveNormal, which points from B toward A).
+                double minProj = Double.MAX_VALUE;
+                for (Vector2D v : worldA) {
+                    double p = v.dot(resolveNormal);
+                    if (p < minProj) minProj = p;
                 }
+                double threshold = minProj + COLLISION_EPSILON;
+                List<Vector2D> contactBodyVerts = new ArrayList<>();
+                for (int k = 0; k < worldA.length; k++) {
+                    if (worldA[k].dot(resolveNormal) <= threshold) contactBodyVerts.add(vertsA[k]);
+                }
+                if (contactBodyVerts.isEmpty()) contactBodyVerts.add(new Vector2D(0, 0));
 
-                if (contactBodyVerts.isEmpty()) continue;
-
-                // Average all penetrating vertices into a single contact point (eliminates
-                // spurious torque on flat-face contacts, same as the CCD fix).
                 double sumX = 0, sumY = 0;
                 for (Vector2D v : contactBodyVerts) { sumX += v.getX(); sumY += v.getY(); }
                 Vector2D avgContact = new Vector2D(sumX / contactBodyVerts.size(), sumY / contactBodyVerts.size());
 
-                // Position correction: push body out by the worst penetration depth
-                A.setWorldPos(A.getWorldPos().add(resolveNormal.scale(maxDepth)));
+                // Split position correction proportionally to inverse mass so neither body
+                // gets driven into a third object (e.g. hex pushing player through a wall).
+                // Static bodies contribute zero inverse-mass and absorb no correction.
+                double invMassA = 1.0 / A.getMass();
+                double invMassB = B.isStatic() ? 0.0 : 1.0 / B.getMass();
+                double totalInvMass = invMassA + invMassB;
+                A.setWorldPos(A.getWorldPos().add(resolveNormal.scale(depth * invMassA / totalInvMass)));
+                if (!B.isStatic()) B.setWorldPos(B.getWorldPos().subtract(resolveNormal.scale(depth * invMassB / totalInvMass)));
 
-                // Velocity correction:
-                // Normally let handleCollision handle everything so angular dynamics
-                // play out naturally (off-center impulse tips corner-resting bodies over).
-                // The one exception: if the center is approaching the surface but spin
-                // makes the contact POINT appear to separate, handleCollision would skip
-                // the impulse entirely and the body would sink. Zero the center velocity
-                // only in that specific case.
                 Vector2D vel = A.getVelocity();
                 double centerApproach  = vel.dot(resolveNormal);
                 Vector2D contactVel    = getPointVelocity(A, avgContact);
@@ -561,24 +550,58 @@ public class PhysicsSimulator {
                     handleCollision(A, B, avgContact, resolveNormal);
                 }
                 anyResolved = true;
-                // Do NOT return — continue checking remaining pairs so all penetrations
-                // are resolved in a single pass rather than one per simulateTimeStep call.
             }
         }
         return anyResolved;
     }
 
-    // Ray-casting point-in-polygon test
-    private boolean pointInPolygon(Vector2D pt, Vector2D[] poly) {
-        boolean inside = false;
-        for (int i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-            double xi = poly[i].getX(), yi = poly[i].getY();
-            double xj = poly[j].getX(), yj = poly[j].getY();
-            boolean intersect = ((yi > pt.getY()) != (yj > pt.getY())) &&
-                (pt.getX() < (xj - xi) * (pt.getY() - yi) / (yj - yi + 1e-12) + xi);
-            if (intersect) inside = !inside;
+    // Full SAT overlap test for two convex polygons.
+    // Tests every edge normal of both polygons. Returns {depth, nx, ny} — the minimum
+    // translation vector that pushes worldA out of worldB — or null if a separating axis exists.
+    // The returned normal points from B toward A.
+    private double[] satPenetration(Vector2D[] worldA, Vector2D[] worldB,
+                                    Vector2D centerA, Vector2D centerB) {
+        double minDepth = Double.MAX_VALUE;
+        double bestNX = 0, bestNY = 0;
+
+        for (int pass = 0; pass < 2; pass++) {
+            Vector2D[] poly = (pass == 0) ? worldA : worldB;
+            for (int i = 0; i < poly.length; i++) {
+                Vector2D e0 = poly[i];
+                Vector2D e1 = poly[(i + 1) % poly.length];
+                double ex = e1.getX() - e0.getX(), ey = e1.getY() - e0.getY();
+                double mag = Math.sqrt(ex * ex + ey * ey);
+                if (mag < COLLISION_EPSILON) continue;
+                double nx = ey / mag, ny = -ex / mag;
+
+                double minA = Double.MAX_VALUE, maxA = -Double.MAX_VALUE;
+                for (Vector2D v : worldA) {
+                    double p = v.getX() * nx + v.getY() * ny;
+                    if (p < minA) minA = p;
+                    if (p > maxA) maxA = p;
+                }
+                double minB = Double.MAX_VALUE, maxB = -Double.MAX_VALUE;
+                for (Vector2D v : worldB) {
+                    double p = v.getX() * nx + v.getY() * ny;
+                    if (p < minB) minB = p;
+                    if (p > maxB) maxB = p;
+                }
+
+                double overlap = Math.min(maxA, maxB) - Math.max(minA, minB);
+                if (overlap <= 0) return null; // Separating axis — bodies do not overlap
+
+                if (overlap < minDepth) {
+                    minDepth = overlap;
+                    // Flip so the normal points from B toward A
+                    double dot = (centerA.getX() - centerB.getX()) * nx + (centerA.getY() - centerB.getY()) * ny;
+                    double sign = (dot >= 0) ? 1.0 : -1.0;
+                    bestNX = nx * sign;
+                    bestNY = ny * sign;
+                }
+            }
         }
-        return inside;
+
+        return new double[]{minDepth, bestNX, bestNY};
     }
 
     /**
@@ -600,13 +623,3 @@ public class PhysicsSimulator {
         }
     }
 }
-
-
-
-
-
-
-
-
-
-

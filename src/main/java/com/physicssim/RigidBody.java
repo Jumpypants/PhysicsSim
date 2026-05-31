@@ -1,3 +1,5 @@
+package com.physicssim;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -17,28 +19,34 @@ public class RigidBody {
     private Vector2D linearAcceleration; // In world-space, computed from applied forces
     private double angularAcceleration; // In body-space, computed from applied forces
 
+    private final double dragCoefficient; // Linear drag: F_drag = -drag * v (kg/s); terminal velocity = mass*g/drag
     private final boolean isStatic;
     private final ArrayList<Force> appliedForces = new ArrayList<>();
     private final ArrayList<Force> temporaryForces = new ArrayList<>(); // Cleared and refilled each step (e.g. friction)
 
     public RigidBody(Vector2D[] vertices, double mass, Vector2D pos, double orientation) {
-        this(vertices, mass, pos, orientation, 0.8, false, 0.3);
+        this(vertices, mass, pos, orientation, 0.8, false, 0.3, 0.0);
     }
 
     public RigidBody(Vector2D[] vertices, double mass, Vector2D pos, double orientation, double coefficientOfRestitution) {
-        this(vertices, mass, pos, orientation, coefficientOfRestitution, false, 0.3);
+        this(vertices, mass, pos, orientation, coefficientOfRestitution, false, 0.3, 0.0);
     }
 
     public RigidBody(Vector2D[] vertices, double mass, Vector2D pos, double orientation, double coefficientOfRestitution, boolean isStatic) {
-        this(vertices, mass, pos, orientation, coefficientOfRestitution, isStatic, 0.3);
+        this(vertices, mass, pos, orientation, coefficientOfRestitution, isStatic, 0.3, 0.0);
     }
 
     public RigidBody(Vector2D[] vertices, double mass, Vector2D pos, double orientation, double coefficientOfRestitution, boolean isStatic, double coefficientOfKineticFriction) {
+        this(vertices, mass, pos, orientation, coefficientOfRestitution, isStatic, coefficientOfKineticFriction, 0.0);
+    }
+
+    public RigidBody(Vector2D[] vertices, double mass, Vector2D pos, double orientation, double coefficientOfRestitution, boolean isStatic, double coefficientOfKineticFriction, double dragCoefficient) {
         this.vertices = vertices;
         this.mass = mass;
         this.coefficientOfRestitution = coefficientOfRestitution;
         this.isStatic = isStatic;
         this.coefficientOfKineticFriction = coefficientOfKineticFriction;
+        this.dragCoefficient = dragCoefficient;
 
         this.momentOfInertia = calculateMomentOfInertia(vertices, mass);
 
@@ -90,6 +98,14 @@ public class RigidBody {
         // Update velocities based on acceleration
         this.velocity = velocity.add(linearAcceleration.scale(time));
         this.angularVelocity += angularAcceleration * time;
+
+        // Apply linear and angular drag: F_drag = -drag * v → damp velocity each step
+        if (dragCoefficient > 0) {
+            double linearDamp = Math.max(0.0, 1.0 - dragCoefficient / mass * time);
+            this.velocity = this.velocity.scale(linearDamp);
+            double angularDamp = Math.max(0.0, 1.0 - dragCoefficient / momentOfInertia * time);
+            this.angularVelocity *= angularDamp;
+        }
     }
 
     public void applyForce(Force f) {
@@ -166,6 +182,10 @@ public class RigidBody {
 
     public double getWorldOrientation() {
         return worldOrientation;
+    }
+
+    public Vector2D toWorldSpace(Vector2D bodyPoint) {
+        return bodyPoint.rotate(worldOrientation).add(worldPos);
     }
 
     /**
