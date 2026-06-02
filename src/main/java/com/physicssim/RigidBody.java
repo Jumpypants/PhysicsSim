@@ -4,6 +4,10 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class RigidBody {
+    private static final double SLEEP_VELOCITY_THRESHOLD = 0.1;
+    private static final double SLEEP_ANGULAR_VELOCITY_THRESHOLD = 0.1;
+    private static final double SLEEP_TIME_REQUIRED = 0.5;
+
     private final Vector2D[] vertices;
 
     private final double mass;
@@ -24,6 +28,12 @@ public class RigidBody {
     private final ArrayList<Force> appliedForces = new ArrayList<>();
     private final ArrayList<Force> temporaryForces = new ArrayList<>(); // Cleared and refilled each step (e.g. friction)
 
+    private final double boundingRadius; // Max vertex distance from body-space origin; rotation-invariant
+    private Vector2D[] cachedWorldVertices;
+    private boolean worldVerticesDirty = true;
+    private double sleepTimer = 0.0;
+    private boolean isSleeping = false;
+
     public RigidBody(Vector2D[] vertices, double mass, Vector2D pos, double orientation) {
         this(vertices, mass, pos, orientation, 0.8, false, 0.3, 0.0);
     }
@@ -41,7 +51,7 @@ public class RigidBody {
     }
 
     public RigidBody(Vector2D[] vertices, double mass, Vector2D pos, double orientation, double coefficientOfRestitution, boolean isStatic, double coefficientOfKineticFriction, double dragCoefficient) {
-        this.vertices = vertices;
+        this.vertices = centerOnCentroid(vertices);
         this.mass = mass;
         this.coefficientOfRestitution = coefficientOfRestitution;
         this.isStatic = isStatic;
@@ -49,6 +59,14 @@ public class RigidBody {
         this.dragCoefficient = dragCoefficient;
 
         this.momentOfInertia = calculateMomentOfInertia(vertices, mass);
+
+        double maxR = 0.0;
+        for (Vector2D v : vertices) {
+            double r = Math.sqrt(v.getX() * v.getX() + v.getY() * v.getY());
+            if (r > maxR) maxR = r;
+        }
+        this.boundingRadius = maxR;
+        this.cachedWorldVertices = new Vector2D[vertices.length];
 
         this.velocity = new Vector2D(0, 0);
         this.worldPos = pos;
@@ -85,7 +103,7 @@ public class RigidBody {
     }
 
     public void stepTime (double time) {
-        if (isStatic) return;
+        if (isStatic || isSleeping) return;
 
         // Update accelerations based on currently applied forces
         this.linearAcceleration = getLinearAcceleration();
@@ -94,6 +112,7 @@ public class RigidBody {
         // Update position and orientation based on current velocity and acceleration
         this.worldPos = calculateWorldPosAfterTime(time);
         this.worldOrientation = calculateWorldOrientationAfterTime(time);
+        this.worldVerticesDirty = true;
 
         // Update velocities based on acceleration
         this.velocity = velocity.add(linearAcceleration.scale(time));
@@ -138,6 +157,8 @@ public class RigidBody {
 
     public void setVelocity(Vector2D velocity) {
         this.velocity = velocity;
+        this.isSleeping = false;
+        this.sleepTimer = 0.0;
     }
 
     public double getAngularVelocity() {
@@ -146,6 +167,8 @@ public class RigidBody {
 
     public void setAngularVelocity(double angularVelocity) {
         this.angularVelocity = angularVelocity;
+        this.isSleeping = false;
+        this.sleepTimer = 0.0;
     }
 
     public double getMass () {
@@ -178,6 +201,14 @@ public class RigidBody {
 
     public void setWorldPos(Vector2D worldPos) {
         this.worldPos = worldPos;
+        this.worldVerticesDirty = true;
+        this.isSleeping = false;
+        this.sleepTimer = 0.0;
+    }
+
+    public void setWorldOrientation(double worldOrientation) {
+        this.worldOrientation = worldOrientation;
+        this.worldVerticesDirty = true;
     }
 
     public double getWorldOrientation() {
@@ -186,6 +217,50 @@ public class RigidBody {
 
     public Vector2D toWorldSpace(Vector2D bodyPoint) {
         return bodyPoint.rotate(worldOrientation).add(worldPos);
+    }
+
+    public double getBoundingRadius() {
+        return boundingRadius;
+    }
+
+    /** Returns the cached world-space vertices. Do not modify the returned array. */
+    public Vector2D[] getWorldVertices() {
+        if (worldVerticesDirty) {
+            for (int i = 0; i < vertices.length; i++) {
+                cachedWorldVertices[i] = vertices[i].rotate(worldOrientation).add(worldPos);
+            }
+            worldVerticesDirty = false;
+        }
+        return cachedWorldVertices;
+    }
+
+    public boolean isSleeping() {
+        return isSleeping;
+    }
+
+    public void wakeUp() {
+        this.isSleeping = false;
+        this.sleepTimer = 0.0;
+    }
+
+    /**
+     * Increments the sleep timer and puts the body to sleep once it has been
+     * below the velocity thresholds for SLEEP_TIME_REQUIRED seconds.
+     */
+    public void updateSleepTimer(double dt) {
+        if (isStatic || isSleeping) return;
+        double speedSq = velocity.getX() * velocity.getX() + velocity.getY() * velocity.getY();
+        if (speedSq < SLEEP_VELOCITY_THRESHOLD * SLEEP_VELOCITY_THRESHOLD
+                && Math.abs(angularVelocity) < SLEEP_ANGULAR_VELOCITY_THRESHOLD) {
+            sleepTimer += dt;
+            if (sleepTimer >= SLEEP_TIME_REQUIRED) {
+                isSleeping = true;
+                velocity = new Vector2D(0, 0);
+                angularVelocity = 0;
+            }
+        } else {
+            sleepTimer = 0.0;
+        }
     }
 
     /**
@@ -228,6 +303,32 @@ public class RigidBody {
         all.addAll(appliedForces);
         all.addAll(temporaryForces);
         return all;
+    }
+
+    /**
+     * Shifts the vertex array so that the polygon's centroid lands exactly at the origin.
+     * This ensures the body-space origin is always the true center of mass, regardless of
+     * how the caller defined the shape.
+     */
+    private static Vector2D[] centerOnCentroid(Vector2D[] vertices) {
+        int n = vertices.length;
+        double area = 0, cx = 0, cy = 0;
+        for (int i = 0; i < n; i++) {
+            Vector2D a = vertices[i], b = vertices[(i + 1) % n];
+            double cross = a.getX() * b.getY() - b.getX() * a.getY();
+            area += cross;
+            cx += (a.getX() + b.getX()) * cross;
+            cy += (a.getY() + b.getY()) * cross;
+        }
+        area *= 0.5;
+        cx /= 6.0 * area;
+        cy /= 6.0 * area;
+
+        Vector2D[] centered = new Vector2D[n];
+        for (int i = 0; i < n; i++) {
+            centered[i] = new Vector2D(vertices[i].getX() - cx, vertices[i].getY() - cy);
+        }
+        return centered;
     }
 
     /**

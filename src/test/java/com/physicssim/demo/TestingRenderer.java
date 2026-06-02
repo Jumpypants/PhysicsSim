@@ -14,7 +14,7 @@ import java.util.List;
  * Transforms rigid bodies from world-space to screen-space using position, scale, and rotation.
  */
 public class TestingRenderer {
-    private static final int VERTEX_RADIUS = 5; // Radius of the red circles at vertices
+    private static final int VERTEX_RADIUS = 3; // Radius of the red circles at vertices
 
     // Force visualization settings (all in pixels unless otherwise noted)
     private static final int FORCE_POINT_RADIUS = 4;            // small circle at application point
