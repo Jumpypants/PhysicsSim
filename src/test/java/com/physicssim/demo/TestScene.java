@@ -34,7 +34,7 @@ public class TestScene extends JPanel {
             Toolkit.getDefaultToolkit().getScreenSize().width / 20.0;
 
     private static final double GRAVITY = 9.8;
-    private static final int DYNAMIC_BODY_COUNT = 20;
+    private static final int DYNAMIC_BODY_COUNT = 10;
     private static final double SCENE_DURATION = 6.0;
 
     // Number of static boundary bodies kept across resets

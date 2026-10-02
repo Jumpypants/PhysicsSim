@@ -40,6 +40,35 @@ public class PhysicsUtils {
     }
 
     /**
+     * Returns the first body within {@code skinDistance} of any vertex of {@code body},
+     * regardless of edge normal direction. Returns null if no contact is found.
+     * Used by the kick attack to detect the first body hit and distinguish static
+     * surfaces (walls/floor) from dynamic bodies (players).
+     */
+    public static RigidBody getContactBody(RigidBody body, List<RigidBody> others, double skinDistance) {
+        Vector2D[] worldVerts = body.getWorldVertices();
+        for (RigidBody other : others) {
+            if (other == body) continue;
+            Vector2D[] otherWorld = other.getWorldVertices();
+            int n = otherWorld.length;
+            for (Vector2D v : worldVerts) {
+                for (int e = 0; e < n; e++) {
+                    Vector2D e0 = otherWorld[e], e1 = otherWorld[(e + 1) % n];
+                    double ex = e1.getX() - e0.getX(), ey = e1.getY() - e0.getY();
+                    double edgeLenSq = ex * ex + ey * ey;
+                    if (edgeLenSq < 1e-12) continue;
+                    double tx = v.getX() - e0.getX(), ty = v.getY() - e0.getY();
+                    double t = (tx * ex + ty * ey) / edgeLenSq;
+                    if (t < 0 || t > 1) continue;
+                    double dist = Math.abs(tx * ey - ty * ex) / Math.sqrt(edgeLenSq);
+                    if (dist <= skinDistance) return other;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
      * Returns the outward-facing normal of a wall surface the body is touching,
      * or null if no wall contact is found. A wall is any edge whose normal is
      * predominantly horizontal (|normalX| > 0.7). The returned normal points away

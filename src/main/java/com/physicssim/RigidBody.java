@@ -12,7 +12,7 @@ public class RigidBody {
 
     private final double mass;
     private final double momentOfInertia; // About the body-space origin
-    private final double coefficientOfRestitution; // Bounciness (0 = perfectly inelastic, 1 = perfectly elastic)
+    private double coefficientOfRestitution; // Bounciness (0 = perfectly inelastic, 1 = perfectly elastic)
     private final double coefficientOfKineticFriction;
 
     private Vector2D velocity; // In world-space
@@ -78,7 +78,7 @@ public class RigidBody {
     }
 
     public static RigidBody createStatic(Vector2D[] vertices, Vector2D pos, double orientation) {
-        return new RigidBody(vertices, 1.0, pos, orientation, 0.5, true, 0.4);
+        return new RigidBody(vertices, 1.0, pos, orientation, 0.0, true, 0.4);
     }
 
     public boolean isStatic() {
@@ -181,6 +181,10 @@ public class RigidBody {
 
     public double getCoefficientOfRestitution() {
         return coefficientOfRestitution;
+    }
+
+    public void setCoefficientOfRestitution(double e) {
+        this.coefficientOfRestitution = e;
     }
 
     public double getCoefficientOfKineticFriction() {
